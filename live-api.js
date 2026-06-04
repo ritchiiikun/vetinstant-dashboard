@@ -341,92 +341,30 @@
     global.VetDashboardUi?.updateDiseaseDistribution?.(buildWardDiseaseDistribution());
   }
 
-  async function fetchDailyPetsForDate(dateIso) {
-    if (!store.client) throw new Error("API client not ready");
-    if (store.dailyPetsCacheDate === dateIso && store.dailyPetsCache) {
-      return store.dailyPetsCache;
-    }
-    const raw = await store.client.dailyPets(dateIso);
-    const pets = Array.isArray(raw?.pets) ? raw.pets : [];
-    store.dailyPetsCache = {
-      date: String(raw?.date || dateIso),
-      pet_count: Number(raw?.pet_count ?? pets.length),
-      pets,
-    };
-    store.dailyPetsCacheDate = dateIso;
-    return store.dailyPetsCache;
-  }
-
-  function findPetByDailyEntry(entry) {
-    const pid = String(entry.pet_id || entry.id || "").trim();
-    if (pid) {
-      const hit = store.pets.find((p) => petId(p) === pid);
-      if (hit) return hit;
-    }
-    const name = String(entry.pet_name || entry.name || "").trim().toLowerCase();
-    if (!name) return null;
-    return (
-      store.pets.find((p) => {
-        const n = petName(p).toLowerCase();
-        const d = displayName(p).toLowerCase();
-        return n === name || d === name;
-      }) || null
-    );
-  }
-
-  async function buildWardDailyReportAsync() {
+  function buildWardDailyReport() {
     const dateIso = todayIsoIst();
     const dateLabel = formatDisplayDate(dateIso);
     const totalPets = store.pets.length;
     const takenRows = [];
-    let dailyList = [];
 
-    if (store.client) {
-      try {
-        const payload = await fetchDailyPetsForDate(dateIso);
-        dailyList = payload.pets || [];
-      } catch (e) {
-        console.warn("daily-pets API:", e);
-      }
-    }
-
-    const entries =
-      dailyList.length > 0
-        ? dailyList
-        : store.pets
-            .filter((p) => sessionsForDate(p._sessions || [], dateIso).length > 0)
-            .map((p) => ({ pet_id: petId(p), pet_name: petName(p) }));
-
-    for (const entry of entries) {
-      const apiName = String(entry.pet_name || entry.name || "").trim();
-      let pet = findPetByDailyEntry(entry);
-      const pid = String(entry.pet_id || entry.id || "").trim();
-      if (!pet && pid) {
-        pet = { id: pid, pet_id: pid, name: apiName || "Unknown", pet_name: apiName };
-      }
-      if (!pet) continue;
-
-      await loadSessionsForPet(pet);
-      await applyDateToPet(pet, dateIso);
-
+    for (const pet of store.pets) {
       const onDate = sessionsForDate(pet._sessions || [], dateIso);
-      const latest = onDate.length ? onDate[onDate.length - 1] : null;
+      if (!onDate.length) continue;
       const regt = petRmtNo(pet);
       const openId = petId(pet) || regt;
-      const name = horseDisplayName(null, pet) || apiName;
+      const name = horseDisplayName(null, pet);
       const label =
-        regt !== "—" && name && name !== "—"
+        regt !== "—" && name !== "—"
           ? `Horse ${regt} · ${name}`
           : regt !== "—"
             ? `Horse ${regt}`
-            : `Horse ${apiName || petName(pet)}`;
+            : `Horse ${petName(pet)}`;
+      const latest = onDate[onDate.length - 1];
       const time = latest ? sessionTimeIst(latest) : "—";
       const ward = findWardForPet(pet);
-      const latestSid = latest ? String(latest.id ?? latest.exam_session_id ?? "").trim() : "";
+      const latestSid = String(latest?.id ?? latest?.exam_session_id ?? "").trim();
       const tempC =
-        latest && store.selectedDate === dateIso && pet._detailSessionId === latestSid
-          ? pet._latestTempC
-          : null;
+        pet._detailSessionId === latestSid ? pet._latestTempC : null;
 
       let vitalDetail = "Device session recorded";
       let vitalTag = "Complete";
@@ -440,7 +378,7 @@
           vitalClass = "flagged";
         }
       } else if (ward) {
-        vitalDetail = `${conditionDisplayLabel(ward.disease)} — scanned ${dateLabel}`;
+        vitalDetail = `${conditionDisplayLabel(ward.disease)} — session on ${dateLabel}, no temperature`;
         vitalTag = "Logged";
         vitalClass = "";
       }
@@ -453,9 +391,7 @@
         staff: "Device round",
         tag: vitalTag,
         tagClass: vitalClass,
-        sortKey: latest
-          ? new Date(latest.started_at || latest.created_at || 0).getTime()
-          : 0,
+        sortKey: latest ? sessionTimestampMs(latest) : 0,
       });
     }
 
@@ -465,20 +401,14 @@
     const checkups = [];
     const n = vitals.length;
     const lastTime = n ? vitals[n - 1].time : "—";
-    const scannedNote =
-      dailyList.length > 0
-        ? `${n} scanned today (device uploads)`
-        : `${n} with sessions on ${dateLabel}`;
 
     return {
       title: "Today's Daily Report",
-      subtitle: `${scannedNote} · ${dateLabel} IST`,
+      subtitle: `Device vitals for ${dateLabel} (IST)`,
       dateLabel,
-      syncLabel: totalPets
-        ? `${scannedNote} · ${totalPets} registered`
-        : "Loading…",
+      syncLabel: totalPets ? `${totalPets} horses registered` : "Loading…",
       summaryNotes: {
-        vitals: "Horses scanned today (same list as Excel daily summary)",
+        vitals: "Horses with a device session on this date",
         treatments: "No treatment records for this date",
         checkups: "No separate checkup records for this date",
         completed: "Sessions completed on this date",
@@ -510,19 +440,25 @@
 
   async function renderWardDailyReport() {
     if (!global.VetAuth?.isLoggedIn?.()) return;
-    const report = await buildWardDailyReportAsync();
-    global.VetDashboardUi?.updateDailyReport?.(report);
+    const today = todayIsoIst();
+    syncHealthDateToTodayIst();
+    if (store.pets.length) {
+      for (const pet of store.pets) {
+        await applyDateToPet(pet, today);
+      }
+    }
+    global.VetDashboardUi?.updateDailyReport?.(buildWardDailyReport());
   }
 
   async function refreshTodayDashboard() {
     if (!global.VetAuth?.isLoggedIn?.()) return;
-    const today = syncHealthDateToTodayIst();
-    store.dailyPetsCache = null;
-    store.dailyPetsCacheDate = null;
+    syncHealthDateToTodayIst();
     if (store.pets.length) {
-      await applyDateFilter(today);
+      await applyDateFilter(store.selectedDate);
+      await renderWardDailyReport();
+    } else {
+      await renderWardDailyReport();
     }
-    await renderWardDailyReport();
   }
 
   function applyHerdDiseaseFilter(diseaseKey, label) {
@@ -649,8 +585,27 @@
     timeZone: "Asia/Kolkata",
     hour: "2-digit",
     minute: "2-digit",
+    second: "2-digit",
     hour12: false,
   });
+
+  /** API often returns IST wall-clock without +05:30; treat naive strings as IST, not browser local/UTC. */
+  function parseApiTimestamp(raw) {
+    const text = String(raw ?? "").trim();
+    if (!text) return null;
+    const normalized = text.replace("Z", "+00:00");
+    if (/[+-]\d{2}:\d{2}$/.test(normalized)) {
+      const d = new Date(normalized);
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+    const d = new Date(`${normalized}+05:30`);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  function sessionTimestampMs(session) {
+    const d = parseApiTimestamp(session?.started_at ?? session?.created_at);
+    return d ? d.getTime() : 0;
+  }
 
   const store = {
     client: null,
@@ -658,8 +613,6 @@
     loading: false,
     error: null,
     selectedDate: null,
-    dailyPetsCache: null,
-    dailyPetsCacheDate: null,
   };
 
   function $(id) {
@@ -736,37 +689,21 @@
   }
 
   function sessionStartedDateIst(session) {
-    const raw = String(session?.started_at ?? session?.created_at ?? "").trim();
-    if (!raw) return null;
-    try {
-      const parsed = new Date(raw.replace("Z", "+00:00"));
-      if (Number.isNaN(parsed.getTime())) return null;
-      return istDateFormatter.format(parsed);
-    } catch {
-      return null;
-    }
+    const parsed = parseApiTimestamp(session?.started_at ?? session?.created_at);
+    if (!parsed) return null;
+    return istDateFormatter.format(parsed);
   }
 
   function sessionTimeIst(session) {
-    const raw = String(session?.started_at ?? session?.created_at ?? "").trim();
-    if (!raw) return "";
-    try {
-      const parsed = new Date(raw.replace("Z", "+00:00"));
-      if (Number.isNaN(parsed.getTime())) return "";
-      return istTimeFormatter.format(parsed);
-    } catch {
-      return "";
-    }
+    const parsed = parseApiTimestamp(session?.started_at ?? session?.created_at);
+    if (!parsed) return "";
+    return istTimeFormatter.format(parsed);
   }
 
   function sessionsForDate(allSessions, dateIso) {
     return (allSessions || [])
       .filter((s) => sessionStartedDateIst(s) === dateIso)
-      .sort((a, b) => {
-        const ta = new Date(a.started_at || a.created_at || 0).getTime();
-        const tb = new Date(b.started_at || b.created_at || 0).getTime();
-        return ta - tb;
-      });
+      .sort((a, b) => sessionTimestampMs(a) - sessionTimestampMs(b));
   }
 
   function sessionNumbersLabel(sessionsOnDate) {
@@ -954,11 +891,9 @@
     }
     await ensureClient();
     await loadSessionsForPet(pet);
-    const sessions = [...(pet._sessions || [])].sort((a, b) => {
-      const ta = new Date(a.started_at || a.created_at || 0).getTime();
-      const tb = new Date(b.started_at || b.created_at || 0).getTime();
-      return ta - tb;
-    });
+    const sessions = [...(pet._sessions || [])].sort(
+      (a, b) => sessionTimestampMs(a) - sessionTimestampMs(b)
+    );
     for (let i = sessions.length - 1; i >= 0; i--) {
       let readings = [];
       try {
@@ -981,11 +916,9 @@
   async function buildTemperatureTrend(pet) {
     await ensureClient();
     await loadSessionsForPet(pet);
-    const sessions = [...(pet._sessions || [])].sort((a, b) => {
-      const ta = new Date(a.started_at || a.created_at || 0).getTime();
-      const tb = new Date(b.started_at || b.created_at || 0).getTime();
-      return ta - tb;
-    });
+    const sessions = [...(pet._sessions || [])].sort(
+      (a, b) => sessionTimestampMs(a) - sessionTimestampMs(b)
+    );
     const recent = sessions.slice(-14);
     const dayMap = new Map();
 
@@ -1179,10 +1112,7 @@
     renderWardRegister();
     const dateInput = $("health-records-date");
     if (dateInput) {
-      if (!dateInput.value) {
-        dateInput.value = todayIso();
-        store.selectedDate = dateInput.value;
-      }
+      syncHealthDateToTodayIst();
       dateInput.addEventListener("change", () => {
         if (store.pets.length) applyDateFilter(dateInput.value);
         else loadAllPets();
@@ -1200,9 +1130,7 @@
 
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState !== "visible" || !global.VetAuth?.isLoggedIn?.()) return;
-      const today = todayIsoIst();
-      if (store.selectedDate !== today) refreshTodayDashboard();
-      else renderWardDailyReport();
+      refreshTodayDashboard();
     });
 
   }
@@ -1219,8 +1147,6 @@
     store.loading = false;
     store.error = null;
     store.selectedDate = null;
-    store.dailyPetsCache = null;
-    store.dailyPetsCacheDate = null;
     const body = document.querySelector("#herd-table tbody");
     if (body) {
       body.dataset.liveBound = "";
